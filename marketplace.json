@@ -1,0 +1,21 @@
+{
+  "name": "plugin-hub",
+  "plugins": [
+    {
+      "name": "zotero",
+      "source": "./zotero",
+      "version": "0.1.0",
+      "description": "连接本机 Zotero 文献库（本地 API，只读）：搜索文献、读取元数据与 PDF 全文、列出分类/标签、导出 BibTeX/CSL-JSON。",
+      "displayName": "Zotero 文献库",
+      "displayName_i18n": {
+        "zh-CN": "Zotero 文献库",
+        "en": "Zotero Library"
+      },
+      "description_i18n": {
+        "zh-CN": "连接本机 Zotero 文献库（本地 API，只读）：搜索文献、读取元数据与 PDF 全文、列出分类/标签、导出 BibTeX/CSL-JSON。",
+        "en": "Connect to your local Zotero library via the local HTTP API (read-only): search items, read metadata and full text, list collections/tags, export BibTeX/CSL-JSON."
+      },
+      "category": "productivity"
+    }
+  ]
+}

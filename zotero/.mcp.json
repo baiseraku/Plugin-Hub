@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "zotero": {
+      "command": "/Applications/ZCode.app/Contents/Frameworks/ZCode Helper.app/Contents/MacOS/ZCode Helper",
+      "args": [
+        "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+        "__zcode-plugin-host",
+        "${CLAUDE_PLUGIN_ROOT}/mcp/zotero-server.mjs"
+      ],
+      "env": {
+        "ELECTRON_RUN_AS_NODE": "1",
+        "ZOTERO_API_BASE": "${user_config.zotero_api_base}",
+        "ZOTERO_LIBRARY": "${user_config.zotero_library}"
+      }
+    }
+  }
+}
