@@ -80,6 +80,209 @@ function totalResults(res) {
   return Number.isFinite(n) ? n : null;
 }
 
+// ---------- 写操作通道 ----------
+// 写操作依赖 Zotero 插件「Local Write API」（https://github.com/dzackgarza/zotero-local-write-api）：
+// Zotero 官方本地 API 只读，该插件在 23119 端口注册 /version 与 /write 端点，提供本地条目/分类/标签写能力。
+// 未安装插件时：添加文献可降级走 Zotero connector 的 /connector/import（导入到 Zotero 界面当前选中的分类）。
+
+const WRITE_TOKEN = (process.env.ZOTERO_WRITE_TOKEN || "").trim();
+let writeApiCache = { checkedAt: 0, state: "unknown", info: null };
+
+async function writeApiInfo() {
+  if (Date.now() - writeApiCache.checkedAt < 30000 && writeApiCache.state !== "unknown") {
+    return writeApiCache;
+  }
+  let state = "zotero-down";
+  let info = null;
+  try {
+    const res = await fetch(`${API_BASE}/version`, { signal: AbortSignal.timeout(5000) });
+    if (res.ok) {
+      try {
+        const data = await res.json();
+        if (data?.addon_id && data?.version) {
+          state = "ok";
+          info = data;
+        } else {
+          state = "no-plugin";
+        }
+      } catch {
+        state = "no-plugin";
+      }
+    } else {
+      state = "no-plugin";
+    }
+  } catch {
+    state = "zotero-down";
+  }
+  writeApiCache = { checkedAt: Date.now(), state, info };
+  return writeApiCache;
+}
+
+const WRITE_API_HINT =
+  "需要在 Zotero 中安装「Local Write API」插件（本地写端点，开源 GPL：https://github.com/dzackgarza/zotero-local-write-api）。\n" +
+  "安装方法：在其 GitHub Releases 页下载 local-write-api-*.xpi，然后在 Zotero 中打开「工具 → 插件 → 从文件安装插件」选择该文件；装好后无需配置。";
+
+async function requireWriteApi() {
+  const { state, info } = await writeApiInfo();
+  if (state === "zotero-down") {
+    throw new ZoteroError(
+      "无法连接 Zotero 本地服务器（127.0.0.1:23119），请确认 Zotero 桌面端正在运行、且已开启「允许其他应用与本机 Zotero 通信」。",
+    );
+  }
+  if (state === "no-plugin") {
+    throw new ZoteroError(`此写操作需要 Zotero 的本地写端点，但未检测到「Local Write API」插件。\n${WRITE_API_HINT}`);
+  }
+  return info;
+}
+
+async function writeApi(operation, params = {}) {
+  await requireWriteApi();
+  let res;
+  try {
+    res = await fetch(`${API_BASE}/write`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(WRITE_TOKEN ? { Authorization: `Bearer ${WRITE_TOKEN}` } : {}),
+      },
+      body: JSON.stringify({ operation, ...params }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (err) {
+    throw new ZoteroError(`写操作请求失败（${operation}）：${err.message}`);
+  }
+  const text = await res.text();
+  let data = null;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    // 非 JSON 响应按失败处理
+  }
+  if (!res.ok || !data || data.success === false) {
+    const message = data?.error || (text ? truncate(text, 300) : `HTTP ${res.status} ${res.statusText}`);
+    throw new ZoteroError(`写操作失败（${operation}）：${message}`);
+  }
+  return data;
+}
+
+// ---------- 导入通道（Zotero connector，无需插件） ----------
+
+async function importViaConnector(content) {
+  let res;
+  try {
+    res = await fetch(`${API_BASE}/connector/import`, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+      body: content,
+      signal: AbortSignal.timeout(60000),
+    });
+  } catch (err) {
+    throw new ZoteroError(
+      `导入失败：无法连接 Zotero 本地服务器（${err.message}）。请确认 Zotero 桌面端正在运行。`,
+    );
+  }
+  if (res.status === 400) {
+    throw new ZoteroError(
+      "导入失败：Zotero 无法识别该文本的格式（支持 BibTeX / RIS / CSL-JSON / MODS 等；请检查内容是否完整）。",
+    );
+  }
+  if (!res.ok) {
+    throw new ZoteroError(`导入失败：Zotero 返回 HTTP ${res.status}。`);
+  }
+  const payload = await res.json().catch(() => null);
+  return Array.isArray(payload) ? payload : [];
+}
+
+function importItemBrief(it) {
+  const d = it?.data || it || {};
+  return {
+    key: it?.key || d.key || "?",
+    title: d.title || "",
+    itemType: d.itemType || "",
+    date: d.date || "",
+  };
+}
+
+function briefLine(b) {
+  const year = String(b.date || "").match(/\d{4}/)?.[0] || "";
+  return `- ${b.key} | ${b.itemType || "?"} | ${year || "无年份"} | ${truncate(b.title || "(无标题)", 90)}`;
+}
+
+function splitBibtexEntries(text) {
+  const entries = [];
+  let i = 0;
+  while (i < text.length) {
+    const at = text.indexOf("@", i);
+    if (at === -1) break;
+    let j = at;
+    while (j < text.length && text[j] !== "{" && text[j] !== "(") j++;
+    if (j >= text.length) break;
+    const open = text[j];
+    const close = open === "{" ? "}" : ")";
+    let depth = 0;
+    let k = j;
+    for (; k < text.length; k++) {
+      if (text[k] === open) depth++;
+      else if (text[k] === close) {
+        depth--;
+        if (depth === 0) {
+          k++;
+          break;
+        }
+      }
+    }
+    const entry = text.slice(at, k).trim();
+    i = k;
+    if (/^@\s*(string|comment|preamble)\b/i.test(entry)) continue;
+    if (entry) entries.push(entry);
+  }
+  return entries;
+}
+
+function toStrArray(value) {
+  if (Array.isArray(value)) return value.map((v) => String(v).trim()).filter(Boolean);
+  if (typeof value === "string" && value.trim()) return [value.trim()];
+  return [];
+}
+
+const normalizeKeys = toStrArray;
+
+// Local Write API 的 openapi 文档声称导入会自动按 DOI 去重（existing 标志），但 v3.3.1 实现里
+// 没有查重逻辑（实测导入已有 DOI 会创建重复条目）。因此这里在导入前用本地只读 API 自行查重。
+const isDoi = (s) => /^10\.\d{4,9}\/\S+$/i.test(String(s).trim());
+
+function extractDoiFromBibtex(entry) {
+  const m = entry.match(/doi\s*=\s*[{"]([^"}]+)[}"]/i);
+  return m ? m[1].trim() : "";
+}
+
+async function findExistingByDoi(doi) {
+  const target = String(doi).trim().toLowerCase();
+  if (!target) return null;
+  let items;
+  try {
+    // 排除附件：Zotero 搜索为模糊匹配，PDF 全文里的 DOI 串会让大量附件排在真实条目前，
+    // 把精确匹配挤出结果页；排除附件后顶层条目（含真实 DOI 字段）会正常出现。
+    const res = await zFetch("/items", {
+      params: { q: String(doi).trim(), qmode: "everything", itemType: "-attachment", limit: 50 },
+    });
+    items = await res.json();
+  } catch {
+    return null; // 查重失败时不阻止导入
+  }
+  for (const it of items) {
+    if (String(it.data?.DOI || "").trim().toLowerCase() === target) return it;
+  }
+  return null;
+}
+
+function duplicateNote(existing) {
+  const d = existing.data || {};
+  const year = String(d.date || "").match(/\d{4}/)?.[0] || "";
+  return `${existing.key}（${year}${d.publicationTitle ? ` ${truncate(d.publicationTitle, 40)}` : ""}）`;
+}
+
+
 // ---------- 输出格式化 ----------
 
 const truncate = (s, n) => {
@@ -156,6 +359,13 @@ async function toolStatus() {
     zFetch("/tags", { params: { limit: 1 } }),
   ]);
   const version = itemsRes.headers.get("X-Zotero-Version") || "unknown";
+  const writeInfo = await writeApiInfo();
+  const writeLine =
+    writeInfo.state === "ok"
+      ? `- 写能力：Local Write API 插件已安装（v${writeInfo.info.version}）——可添加、修改、删除条目与管理分类`
+      : writeInfo.state === "no-plugin"
+        ? "- 写能力：未安装 Local Write API 插件——可通过内置通道添加文献；修改/删除/分类管理不可用（安装方法见插件 README）"
+        : "- 写能力：Zotero 本地服务器不可达（Zotero 未运行？）";
   const lines = [
     "Zotero 本地 API 连接正常。",
     `- 服务地址：${API_BASE}（Zotero ${version}，API v3）`,
@@ -163,7 +373,7 @@ async function toolStatus() {
     `- 条目总数：${totalResults(itemsRes) ?? "未知"}`,
     `- 分类（collection）数：${totalResults(colsRes) ?? "未知"}`,
     `- 标签数：${totalResults(tagsRes) ?? "未知"}`,
-    "- 注意：本地 API 为只读，插件不能添加、修改或删除 Zotero 中的条目。",
+    writeLine,
   ];
   return lines.join("\n");
 }
@@ -375,6 +585,209 @@ async function toolRecent(args) {
   return `最近${sort === "dateAdded" ? "添加" : "修改"}的条目（${items.length} 条）：\n${items.map(itemLine).join("\n")}\n\n提示：用 zotero_get_item key=<KEY> 查看完整元数据。`;
 }
 
+// ---------- 添加/管理工具实现 ----------
+
+async function fetchSelectedTarget() {
+  try {
+    const res = await fetch(`${API_BASE}/connector/getSelectedCollection`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+async function toolSelectedTarget() {
+  const data = await fetchSelectedTarget();
+  if (!data) {
+    throw new ZoteroError("无法读取 Zotero 的当前选中状态，请确认 Zotero 桌面端正在运行。");
+  }
+  const lines = [
+    `Zotero 界面当前选中：${data.name ? `「${data.name}」` : "文库根目录"}`,
+    `文库：${data.libraryName || "?"}${data.editable === false ? "（只读）" : ""}`,
+  ];
+  const targets = Array.isArray(data.targets) ? data.targets : [];
+  if (targets.length) {
+    lines.push("", "可导入位置（按层级缩进）：");
+    for (const t of targets.slice(0, 40)) {
+      lines.push(`  ${"  ".repeat(Math.max(0, Number(t.level) || 0))}- ${t.name}`);
+    }
+  }
+  lines.push(
+    "",
+    "说明：Zotero 内置导入通道会把新条目放进上方选中的分类；若已安装 Local Write API 插件，可用分类 key 精确指定导入分类。",
+  );
+  return lines.join("\n");
+}
+
+async function toolAddItems(args) {
+  const identifiers = toStrArray(args.identifiers);
+  const bibtex = String(args.bibtex || "").trim();
+  const text = String(args.text || "").trim();
+  const collection = String(args.collection || "").trim();
+  if (!identifiers.length && !bibtex && !text) {
+    throw new ZoteroError("请至少提供 identifiers（DOI/ISBN/arXiv/PMID）、bibtex 或 text 之一。");
+  }
+
+  if (identifiers.length) {
+    const info = await requireWriteApi();
+    const lines = [];
+    for (const identifier of identifiers) {
+      if (isDoi(identifier)) {
+        const existing = await findExistingByDoi(identifier);
+        if (existing) {
+          lines.push(`- ${identifier} → 库中已存在：${duplicateNote(existing)}，跳过导入`);
+          continue;
+        }
+      }
+      const r = await writeApi("import_by_identifier", {
+        identifier,
+        ...(collection ? { collection_keys: [collection] } : {}),
+      });
+      const titles = Array.isArray(r.titles) ? r.titles : [];
+      const keys = (Array.isArray(r.item_keys) && r.item_keys.length ? r.item_keys : [r.item_key]).filter(Boolean);
+      lines.push(
+        `- ${identifier} → ${keys.join(", ") || "?"}${titles[0] ? `\n  ${truncate(titles[0], 90)}` : ""}`,
+      );
+    }
+    return `通过标识符导入完成（DOI 已做重复检查）：\n${lines.join("\n")}${
+      collection ? `\n已加入分类 ${collection}。` : ""
+    }`;
+  }
+
+  const { state } = await writeApiInfo();
+
+  if (bibtex) {
+    const entries = splitBibtexEntries(bibtex);
+    if (!entries.length) throw new ZoteroError("未能从 bibtex 文本中解析出条目，请检查内容是否完整。");
+    if (state === "ok") {
+      const lines = [];
+      for (const entry of entries) {
+        const doi = extractDoiFromBibtex(entry);
+        if (doi) {
+          const existing = await findExistingByDoi(doi);
+          if (existing) {
+            lines.push(`- 跳过（DOI ${doi} 已在库中：${duplicateNote(existing)}）`);
+            continue;
+          }
+        }
+        const r = await writeApi("import_bibtex", {
+          bibtex: entry,
+          ...(collection ? { collection_keys: [collection] } : {}),
+        });
+        const key = r.item_key || (Array.isArray(r.item_keys) ? r.item_keys[0] : "?");
+        const title = Array.isArray(r.titles) ? r.titles[0] : "";
+        lines.push(`- ${key} | ${truncate(title || "(已导入)", 90)}${doi ? "" : "（无 DOI，未做重复检查）"}`);
+      }
+      return `BibTeX 导入完成（含 DOI 的条目已做重复检查）：\n${lines.join("\n")}${
+        collection ? `\n已加入分类 ${collection}。` : ""
+      }`;
+    }
+    return await reportConnectorImport(bibtex, { wantCollection: !!collection });
+  }
+
+  return await reportConnectorImport(text, { wantCollection: !!collection });
+}
+
+async function reportConnectorImport(content, { wantCollection = false } = {}) {
+  const items = await importViaConnector(content);
+  const briefs = items.map(importItemBrief);
+  const lines = briefs.length ? briefs.map(briefLine).join("\n") : "（Zotero 未返回条目明细）";
+  const target = await fetchSelectedTarget();
+  const notes = [];
+  notes.push(
+    target?.name
+      ? `条目已进入 Zotero 当前选中的分类「${target.name}」，请到 Zotero 中查看。`
+      : "请到 Zotero 中查看导入结果（条目进入导入时界面选中的分类）。",
+  );
+  if (wantCollection) {
+    notes.push(
+      "注意：本次走 Zotero 内置导入通道，无法用 collection 参数指定分类。安装 Local Write API 插件后可按分类 key 精确导入。",
+    );
+  }
+  return `导入完成，共 ${briefs.length} 条：\n${lines}\n\n${notes.join("\n")}`;
+}
+
+async function toolUpdateItems(args) {
+  const keys = normalizeKeys(args.keys);
+  if (!keys.length) throw new ZoteroError("缺少 keys（要修改的条目 key，可传多个）。");
+  const fields =
+    args.fields && typeof args.fields === "object" && !Array.isArray(args.fields) ? args.fields : null;
+  const addTags = toStrArray(args.add_tags);
+  const removeTags = toStrArray(args.remove_tags);
+  const addCols = toStrArray(args.add_to_collections);
+  const removeCols = toStrArray(args.remove_from_collections);
+  if (!fields && !addTags.length && !removeTags.length && !addCols.length && !removeCols.length) {
+    throw new ZoteroError(
+      "没有指定任何修改：请提供 fields、add_tags、remove_tags、add_to_collections、remove_from_collections 中至少一项。",
+    );
+  }
+  const lines = [];
+  for (const key of keys) {
+    const done = [];
+    if (fields && Object.keys(fields).length) {
+      await writeApi("update_item_fields", { item_key: key, fields });
+      done.push(`字段（${Object.keys(fields).join("、")}）`);
+    }
+    if (addTags.length) {
+      await writeApi("add_item_tags", { item_key: key, tags: addTags });
+      done.push(`加标签 ${addTags.join("、")}`);
+    }
+    if (removeTags.length) {
+      await writeApi("remove_item_tags", { item_key: key, tags: removeTags });
+      done.push(`去标签 ${removeTags.join("、")}`);
+    }
+    for (const c of addCols) {
+      await writeApi("add_item_to_collection", { item_key: key, collection_key: c });
+      done.push(`加入分类 ${c}`);
+    }
+    for (const c of removeCols) {
+      await writeApi("remove_item_from_collection", { item_key: key, collection_key: c });
+      done.push(`移出分类 ${c}`);
+    }
+    lines.push(`- ${key}：已更新 ${done.join("；")}`);
+  }
+  return `已完成 ${keys.length} 条的修改：\n${lines.join("\n")}`;
+}
+
+async function toolDeleteItems(args) {
+  const keys = normalizeKeys(args.keys);
+  if (!keys.length) throw new ZoteroError("缺少 keys（要删除的条目 key，可传多个）。");
+  const lines = [];
+  for (const key of keys) {
+    await writeApi("trash_item", { item_key: key });
+    lines.push(`- ${key}`);
+  }
+  return `已将 ${keys.length} 条移入 Zotero 回收站：\n${lines.join(
+    "\n",
+  )}\n\n说明：条目在 Zotero 的「回收站」中可随时恢复；彻底删除请在 Zotero 中操作。`;
+}
+
+async function toolCreateCollection(args) {
+  const name = String(args.name || "").trim();
+  if (!name) throw new ZoteroError("缺少 name（新分类名称）。");
+  const parent = String(args.parent || "").trim();
+  const r = await writeApi("create_collection", { name, ...(parent ? { parent_key: parent } : {}) });
+  const d = r.details || {};
+  return `已创建分类「${d.collection_name || name}」，key：${d.collection_key || "?"}${
+    d.parent_key ? `（父分类 ${d.parent_key}）` : ""
+  }。\n提示：用 zotero_search collection=<key> 在该分类内搜索，或用 zotero_update_items 的 add_to_collections 把条目移入。`;
+}
+
+async function toolAddNote(args) {
+  const key = String(args.key || "").trim();
+  const note = String(args.note || "").trim();
+  if (!key) throw new ZoteroError("缺少 key（父条目 key）。");
+  if (!note) throw new ZoteroError("缺少 note（笔记内容）。");
+  const r = await writeApi("attach_note", { parent_item_key: key, note_text: note });
+  return `已为条目 ${key} 添加笔记（笔记 key：${r.note_key || "?"}）。`;
+}
+
 // ---------- MCP 工具注册 ----------
 
 const TOOLS = [
@@ -474,6 +887,98 @@ const TOOLS = [
       additionalProperties: false,
     },
     handler: toolRecent,
+  },
+  {
+    name: "zotero_add_items",
+    description:
+      "向 Zotero 文库添加文献（写操作）。三种输入任选其一：identifiers=DOI/ISBN/arXiv ID/PMID 列表（由 Zotero 自动抓取元数据与可用附件，推荐，需 Local Write API 插件）；bibtex=BibTeX 文本（可多条，自动按 DOI 等去重，需该插件）；text=任意格式文本（BibTeX/RIS/CSL-JSON，经 Zotero 内置导入，进入界面当前选中的分类，无需插件）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        identifiers: {
+          type: "array",
+          items: { type: "string" },
+          description: "DOI / ISBN / arXiv ID / PMID 列表，如 [\"10.1016/j.cmet.2024.01.014\"] 或 [\"PMID:38401546\"]",
+        },
+        bibtex: { type: "string", description: "BibTeX 文本，可包含多条条目" },
+        text: { type: "string", description: "BibTeX/RIS/CSL-JSON 等格式文本（无插件时的导入通道）" },
+        collection: { type: "string", description: "目标分类 key（可选；identifier 与 bibtex 通道生效，需插件）" },
+      },
+      additionalProperties: false,
+    },
+    handler: toolAddItems,
+  },
+  {
+    name: "zotero_update_items",
+    description:
+      "修改已有条目（需 Local Write API 插件）：更新字段、增删标签、加入/移出分类，一次可对多个条目执行。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        keys: { type: "array", items: { type: "string" }, description: "要修改的条目 key 列表" },
+        fields: {
+          type: "object",
+          additionalProperties: true,
+          description: "要更新的字段（Zotero 字段名），如 {\"title\":\"新标题\",\"date\":\"2024\",\"DOI\":\"10.xxxx/yyyy\"}",
+        },
+        add_tags: { type: "array", items: { type: "string" }, description: "要添加的标签" },
+        remove_tags: { type: "array", items: { type: "string" }, description: "要移除的标签" },
+        add_to_collections: { type: "array", items: { type: "string" }, description: "要加入的分类 key 列表" },
+        remove_from_collections: { type: "array", items: { type: "string" }, description: "要移出的分类 key 列表" },
+      },
+      required: ["keys"],
+      additionalProperties: false,
+    },
+    handler: toolUpdateItems,
+  },
+  {
+    name: "zotero_delete_items",
+    description:
+      "把条目移入 Zotero 回收站（需 Local Write API 插件；条目在 Zotero 回收站中可恢复，不会彻底删除）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        keys: { type: "array", items: { type: "string" }, description: "要删除的条目 key 列表" },
+      },
+      required: ["keys"],
+      additionalProperties: false,
+    },
+    handler: toolDeleteItems,
+  },
+  {
+    name: "zotero_create_collection",
+    description: "在 Zotero 中新建分类（需 Local Write API 插件），可指定父分类。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "分类名称" },
+        parent: { type: "string", description: "父分类 key（可选，见 zotero_list_collections）" },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    handler: toolCreateCollection,
+  },
+  {
+    name: "zotero_add_note",
+    description: "给某条文献添加笔记（需 Local Write API 插件）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        key: { type: "string", description: "父条目 key" },
+        note: { type: "string", description: "笔记内容（纯文本或 HTML）" },
+      },
+      required: ["key", "note"],
+      additionalProperties: false,
+    },
+    handler: toolAddNote,
+  },
+  {
+    name: "zotero_selected_target",
+    description:
+      "读取 Zotero 界面当前选中的分类/文库及可导入位置层级。用于确认内置导入通道会把新条目放进哪里（无需插件）。",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    handler: toolSelectedTarget,
   },
 ];
 

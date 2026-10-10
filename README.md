@@ -6,7 +6,7 @@ ZCode 插件仓库，以「目录型插件市场」形式分发：在 ZCode 中�
 
 | 插件 | 版本 | 说明 |
 |---|---|---|
-| [zotero](./zotero/) | 0.1.0 | 连接本机 Zotero 文献库（本地 API，只读）：搜索文献、读取元数据与 PDF 全文、列出分类/标签、导出 BibTeX/CSL-JSON |
+| [zotero](./zotero/) | 0.2.0 | 连接本机 Zotero 文献库：搜索与阅读文献、读取 PDF 全文、添加文献（DOI/BibTeX 导入，导入前按 DOI 查重）、修改/删除/分类管理（写管理需 Local Write API 插件）、导出 BibTeX/CSL-JSON |
 
 ## 在 ZCode 中使用
 
@@ -16,4 +16,5 @@ ZCode 插件仓库，以「目录型插件市场」形式分发：在 ZCode 中�
 
 ## 插件依赖
 
-- **zotero**：需要 Zotero 7+ 桌面端正在运行，并在 Zotero「设置 → 高级」中勾选「允许其他应用与本机 Zotero 通信」。详见 [zotero/README.md](./zotero/README.md)。
+- **zotero**：需要 Zotero 7+ 桌面端正在运行，并在 Zotero「设置 → 高级」中勾选「允许其他应用与本机 Zotero 通信」；修改/删除/分类管理还需安装
+  [Local Write API](https://github.com/dzackgarza/zotero-local-write-api) 插件（在其 Releases 下载 `.xpi`，Zotero → 工具 → 插件 → 从文件安装）。详见 [zotero/README.md](./zotero/README.md)。

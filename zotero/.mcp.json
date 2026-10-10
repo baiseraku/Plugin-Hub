@@ -10,7 +10,8 @@
       "env": {
         "ELECTRON_RUN_AS_NODE": "1",
         "ZOTERO_API_BASE": "${user_config.zotero_api_base}",
-        "ZOTERO_LIBRARY": "${user_config.zotero_library}"
+        "ZOTERO_LIBRARY": "${user_config.zotero_library}",
+        "ZOTERO_WRITE_TOKEN": "${user_config.zotero_write_token}"
       }
     }
   }

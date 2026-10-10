@@ -1,10 +1,10 @@
 {
   "name": "zotero",
-  "version": "0.1.0",
-  "description": "连接本机 Zotero 文献库（本地 API，只读）：搜索文献、读取元数据与 PDF 全文、列出分类/标签、导出 BibTeX/CSL-JSON。",
+  "version": "0.2.0",
+  "description": "连接本机 Zotero 文献库：搜索与阅读文献、读取 PDF 全文、添加文献（DOI/BibTeX 导入）、修改/删除/分类管理（写管理需 Local Write API 插件）、导出 BibTeX/CSL-JSON。",
   "description_i18n": {
-    "en": "Connect to your local Zotero library via the local HTTP API (read-only): search items, read metadata and full text, list collections/tags, export BibTeX/CSL-JSON.",
-    "zh-CN": "连接本机 Zotero 文献库（本地 API，只读）：搜索文献、读取元数据与 PDF 全文、列出分类/标签、导出 BibTeX/CSL-JSON。"
+    "en": "Connect to your local Zotero library: search and read items, fetch full text, add items (DOI/BibTeX import), and manage them (edit/delete/collections; requires the Local Write API add-on for writes), export BibTeX/CSL-JSON.",
+    "zh-CN": "连接本机 Zotero 文献库：搜索与阅读文献、读取 PDF 全文、添加文献（DOI/BibTeX 导入）、修改/删除/分类管理（写管理需 Local Write API 插件）、导出 BibTeX/CSL-JSON。"
   },
   "author": {
     "name": "seraku"
@@ -22,6 +22,11 @@
       "type": "string",
       "default": "users/0",
       "description": "要访问的文库：users/0 为本机用户库；群组库填写 groups/<群组ID>。"
+    },
+    "zotero_write_token": {
+      "type": "string",
+      "default": "",
+      "description": "可选：Local Write API 插件设置的访问令牌（仅当你为该插件配置了 token 时才需要填写；默认留空）。"
     }
   }
 }
